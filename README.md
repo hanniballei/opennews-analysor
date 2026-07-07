@@ -10,15 +10,15 @@ The installed timers collect two profiles:
 
 | Profile | 6551 engines | Schedule | Purpose |
 | --- | --- | --- | --- |
-| `news` | `news` | Every 30 minutes at `:00` and `:30` | News, wire headlines, official channels, social/news signals |
-| `signals` | `onchain`, `market` | Hourly at `:15` | On-chain whale/position events and market anomaly signals |
+| `news` | `news` | Hourly at `:00` | News, wire headlines, official channels, social/news signals |
+| `onchain` | `onchain` | Hourly at `:00`, after `news` finishes | On-chain whale trade and large position events |
 
-The current deployment does **not** collect `meme`, `listing`, or `prediction`.
+The current deployment does **not** collect `meme`, `market`, `listing`, or `prediction`.
 
 ## How It Works
 
-1. systemd timers start one-shot services on schedule.
-2. Each service runs `docker compose run --rm opennews-collector`.
+1. A systemd timer starts one hourly one-shot service on schedule.
+2. The service runs two `docker compose run --rm opennews-collector` commands sequentially: first `news`, then `onchain`.
 3. The container reads `OPENNEWS_TOKEN` from the project `.env`.
 4. The collector calls `POST /open/news_search` with an `engineTypes` filter.
 5. News IDs are deduplicated with local state in `/root/trading/data/opennews/state/seen_ids.json`.
@@ -42,10 +42,8 @@ This keeps normal runs shallow while still expanding coverage during busy period
   Dockerfile
   docker-compose.yml
   scripts/opennews_collector.py
-  deploy/systemd/opennews-news.service
-  deploy/systemd/opennews-news.timer
-  deploy/systemd/opennews-signals.service
-  deploy/systemd/opennews-signals.timer
+  deploy/systemd/opennews-hourly.service
+  deploy/systemd/opennews-hourly.timer
   .env.example
   .gitignore
   .dockerignore
@@ -62,9 +60,9 @@ The real `.env` file is intentionally ignored by both git and Docker build conte
   state/seen_ids.json
   state/last_run.json
   state/last_run_news.json
-  state/last_run_signals.json
+  state/last_run_onchain.json
   state/adaptive_news.json
-  state/adaptive_signals.json
+  state/adaptive_onchain.json
 ```
 
 `raw/` stores API pages exactly as returned by 6551. `normalized/` stores one JSON object per line for downstream processing.
@@ -76,7 +74,7 @@ Each normalized JSONL row contains:
 | Field | Meaning |
 | --- | --- |
 | `id` | Stable OpenNews item ID, or a generated hash when no ID is present |
-| `profile` | Collector profile, currently `news` or `signals` |
+| `profile` | Collector profile, currently `news` or `onchain` |
 | `collected_at` | UTC timestamp when this collector saw the item |
 | `event_date` | Date partition derived from item event time |
 | `published_at` | Source publication time when available |
@@ -126,13 +124,12 @@ Run the default `news` profile:
 docker compose run --rm opennews-collector
 ```
 
-Run the `signals` profile:
+Run the `onchain` profile:
 
 ```bash
 docker compose run --rm opennews-collector \
-  --profile signals \
+  --profile onchain \
   --engine-type onchain \
-  --engine-type market \
   --adaptive-pages \
   --min-pages 3 \
   --max-pages 20 \
@@ -150,12 +147,10 @@ docker compose run --rm opennews-collector --dry-run --no-raw
 Install or update the timers:
 
 ```bash
-cp deploy/systemd/opennews-news.service /etc/systemd/system/
-cp deploy/systemd/opennews-news.timer /etc/systemd/system/
-cp deploy/systemd/opennews-signals.service /etc/systemd/system/
-cp deploy/systemd/opennews-signals.timer /etc/systemd/system/
+cp deploy/systemd/opennews-hourly.service /etc/systemd/system/
+cp deploy/systemd/opennews-hourly.timer /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable --now opennews-news.timer opennews-signals.timer
+systemctl enable --now opennews-hourly.timer
 ```
 
 Check timer status:
@@ -164,27 +159,25 @@ Check timer status:
 systemctl list-timers --all --no-pager 'opennews-*.timer'
 ```
 
-Start a profile manually through systemd:
+Start both profiles manually through systemd:
 
 ```bash
-systemctl start opennews-news.service
-systemctl start opennews-signals.service
+systemctl start opennews-hourly.service
 ```
 
 Read service logs:
 
 ```bash
-journalctl -u opennews-news.service -n 50 --no-pager
-journalctl -u opennews-signals.service -n 50 --no-pager
+journalctl -u opennews-hourly.service -n 80 --no-pager
 ```
 
 ## Useful State Files
 
 ```bash
 cat /root/trading/data/opennews/state/last_run_news.json
-cat /root/trading/data/opennews/state/last_run_signals.json
+cat /root/trading/data/opennews/state/last_run_onchain.json
 cat /root/trading/data/opennews/state/adaptive_news.json
-cat /root/trading/data/opennews/state/adaptive_signals.json
+cat /root/trading/data/opennews/state/adaptive_onchain.json
 ```
 
 `last_run_*.json` shows what the last run fetched. `adaptive_*.json` shows the current page limit and the next run's page limit.
@@ -199,10 +192,10 @@ For U.S. stock and macro use cases, start with:
 - `assets` containing stock tickers or internal `XYZ-*` asset tags
 - `score`, `grade`, and `signal` for priority ranking
 
-For market anomaly signals, use:
+For on-chain signals, use:
 
-- `profile = signals`
-- `engine_type in ("onchain", "market")`
+- `profile = onchain`
+- `engine_type = onchain`
 
 ## Git And Secrets
 
