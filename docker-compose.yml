@@ -16,10 +16,12 @@ services:
       - onchain
       - --split-profile-by-engine
       - --adaptive-pages
-      - --min-pages
-      - "3"
-      - --max-pages
+      - --limit
       - "20"
+      - --min-pages
+      - "1"
+      - --max-pages
+      - "100"
       - --page-step
       - "2"
     volumes:

@@ -8,4 +8,4 @@ WORKDIR /app
 COPY scripts/opennews_collector.py /app/scripts/opennews_collector.py
 
 ENTRYPOINT ["python", "/app/scripts/opennews_collector.py"]
-CMD ["--data-dir", "/data/opennews", "--profile", "combined", "--engine-type", "news", "--engine-type", "onchain", "--split-profile-by-engine", "--adaptive-pages", "--min-pages", "3", "--max-pages", "20", "--page-step", "2"]
+CMD ["--data-dir", "/data/opennews", "--profile", "combined", "--engine-type", "news", "--engine-type", "onchain", "--split-profile-by-engine", "--adaptive-pages", "--limit", "20", "--min-pages", "1", "--max-pages", "100", "--page-step", "2"]

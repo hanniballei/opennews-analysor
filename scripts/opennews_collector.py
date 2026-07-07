@@ -22,6 +22,7 @@ from typing import Any
 DEFAULT_API_BASE_URL = "https://ai.6551.io"
 DEFAULT_DATA_DIR = "/root/trading/data/opennews"
 MAX_LIMIT = 100
+DEFAULT_LIMIT = 20
 
 
 def utc_now() -> datetime:
@@ -281,6 +282,7 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
         pages_fetched = 0
         known_pages = 0
         stopped_on_known_page = False
+        stopped_on_known_item = False
         stopped_on_empty_page = False
         api_url = f"{api_base_url}/open/news_search"
         engine_types = build_engine_types(args.engine_type)
@@ -307,11 +309,13 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
             )
 
             page_new = 0
+            page_known_items = 0
             for item in items:
                 if not isinstance(item, dict):
                     continue
                 item_id = stable_item_id(item)
                 if item_id in seen_ids:
+                    page_known_items += 1
                     continue
                 seen_ids.add(item_id)
                 item_profile = profile_for_item(item, args)
@@ -322,6 +326,9 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
 
             if not items:
                 stopped_on_empty_page = True
+                break
+            if args.stop_on_known_item and page_known_items > 0:
+                stopped_on_known_item = True
                 break
             if page_new == 0:
                 known_pages += 1
@@ -335,7 +342,7 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
             args,
             page_limit,
             pages_fetched,
-            stopped_on_known_page,
+            stopped_on_known_page or stopped_on_known_item,
             stopped_on_empty_page,
         )
         raw_path = None
@@ -369,6 +376,7 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
                     "next_pages": next_pages,
                     "pages_fetched": pages_fetched,
                     "stopped_on_known_page": stopped_on_known_page,
+                    "stopped_on_known_item": stopped_on_known_item,
                     "stopped_on_empty_page": stopped_on_empty_page,
                 },
             )
@@ -382,6 +390,9 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
             "page_limit": page_limit,
             "next_pages": next_pages,
             "pages_fetched": pages_fetched,
+            "stopped_on_known_item": stopped_on_known_item,
+            "stopped_on_known_page": stopped_on_known_page,
+            "stopped_on_empty_page": stopped_on_empty_page,
             "new_items": len(new_rows),
             "counts_by_engine": dict(sorted(counts_by_engine.items())),
             "counts_by_profile": dict(sorted(counts_by_profile.items())),
@@ -402,7 +413,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--profile", default="default")
     parser.add_argument("--engine-type", action="append", default=[])
     parser.add_argument("--split-profile-by-engine", action="store_true")
-    parser.add_argument("--limit", type=int, default=MAX_LIMIT)
+    parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
     parser.add_argument("--max-pages", type=int, default=20)
     parser.add_argument("--min-pages", type=int, default=3)
     parser.add_argument("--page-step", type=int, default=2)
@@ -410,6 +421,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--timeout", type=int, default=30)
     parser.add_argument("--seen-retention", type=int, default=250_000)
     parser.add_argument("--stop-after-known-pages", type=int, default=1)
+    parser.add_argument("--stop-on-known-item", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--no-raw", action="store_false", dest="write_raw")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)

@@ -26,15 +26,17 @@ Normalized rows keep a row-level `profile` derived from `engine_type`: `news` ro
 6. Raw pages and normalized records are written to `/root/trading/data/opennews`.
 7. The container exits; there is no long-running collector container.
 
-Paging is adaptive. The combined profile starts with a small page limit and increases it only when the current run reaches the limit before seeing old items:
+Paging is optimized for 6551's point model, where every returned 20 records cost 1 point. The collector uses `limit = 20` so each page maps to one point, starts with one page, and increases the page limit only when the current run reaches the limit before seeing old items:
 
 ```text
-min pages: 3
+limit: 20
+min pages: 1
 page step: 2
-max pages: 20
+max pages: 100
 ```
 
 This keeps normal runs shallow while still expanding coverage during busy periods.
+When a page contains any already-seen item, the collector processes new items from that page and then stops, assuming the feed is newest-first.
 
 ## Project Layout
 
@@ -132,8 +134,9 @@ docker compose run --rm opennews-collector \
   --engine-type onchain \
   --split-profile-by-engine \
   --adaptive-pages \
-  --min-pages 3 \
-  --max-pages 20 \
+  --limit 20 \
+  --min-pages 1 \
+  --max-pages 100 \
   --page-step 2
 ```
 
@@ -146,12 +149,15 @@ docker compose run --rm opennews-collector \
   --engine-type onchain \
   --split-profile-by-engine \
   --adaptive-pages \
-  --min-pages 3 \
-  --max-pages 20 \
+  --limit 20 \
+  --min-pages 1 \
+  --max-pages 100 \
   --page-step 2 \
   --dry-run \
   --no-raw
 ```
+
+`--dry-run` still calls 6551 and may consume points; it only skips local writes.
 
 ## systemd Deployment
 
