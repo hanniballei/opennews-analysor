@@ -9,9 +9,12 @@ services:
       OPENNEWS_DATA_DIR: /data/opennews
     command:
       - --profile
-      - news
+      - combined
       - --engine-type
       - news
+      - --engine-type
+      - onchain
+      - --split-profile-by-engine
       - --adaptive-pages
       - --min-pages
       - "3"

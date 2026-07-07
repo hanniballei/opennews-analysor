@@ -162,6 +162,13 @@ def normalize_item(
     }
 
 
+def profile_for_item(item: dict[str, Any], args: argparse.Namespace) -> str:
+    if not args.split_profile_by_engine:
+        return args.profile
+    engine_type = item.get("engine_type") or item.get("engineType")
+    return str(engine_type or args.profile)
+
+
 def post_json(url: str, token: str, body: dict[str, Any], timeout: int) -> dict[str, Any]:
     data = json.dumps(body).encode("utf-8")
     request = urllib.request.Request(
@@ -268,6 +275,8 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
         collected_at = utc_now()
         seen_ids = load_seen_ids(seen_path)
         new_rows: list[dict[str, Any]] = []
+        counts_by_engine: dict[str, int] = defaultdict(int)
+        counts_by_profile: dict[str, int] = defaultdict(int)
         raw_pages: list[dict[str, Any]] = []
         pages_fetched = 0
         known_pages = 0
@@ -305,7 +314,10 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
                 if item_id in seen_ids:
                     continue
                 seen_ids.add(item_id)
-                new_rows.append(normalize_item(item, item_id, collected_at, args.profile))
+                item_profile = profile_for_item(item, args)
+                new_rows.append(normalize_item(item, item_id, collected_at, item_profile))
+                counts_by_engine[str(item.get("engine_type") or item.get("engineType") or "")] += 1
+                counts_by_profile[item_profile] += 1
                 page_new += 1
 
             if not items:
@@ -371,6 +383,8 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
             "next_pages": next_pages,
             "pages_fetched": pages_fetched,
             "new_items": len(new_rows),
+            "counts_by_engine": dict(sorted(counts_by_engine.items())),
+            "counts_by_profile": dict(sorted(counts_by_profile.items())),
             "seen_ids": len(seen_ids),
             "raw_path": str(raw_path) if raw_path else None,
             "data_dir": str(data_dir),
@@ -387,6 +401,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--api-base-url", default=DEFAULT_API_BASE_URL)
     parser.add_argument("--profile", default="default")
     parser.add_argument("--engine-type", action="append", default=[])
+    parser.add_argument("--split-profile-by-engine", action="store_true")
     parser.add_argument("--limit", type=int, default=MAX_LIMIT)
     parser.add_argument("--max-pages", type=int, default=20)
     parser.add_argument("--min-pages", type=int, default=3)

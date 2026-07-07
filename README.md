@@ -6,26 +6,27 @@ The project periodically pulls 6551 OpenNews data, deduplicates items locally, a
 
 ## What It Collects
 
-The installed timers collect two profiles:
+The installed timer runs one combined request:
 
 | Profile | 6551 engines | Schedule | Purpose |
 | --- | --- | --- | --- |
-| `news` | `news` | Hourly at `:00` | News, wire headlines, official channels, social/news signals |
-| `onchain` | `onchain` | Hourly at `:00`, after `news` finishes | On-chain whale trade and large position events |
+| `combined` | `news`, `onchain` | Hourly at `:00` | News plus on-chain whale trade and large position events |
 
 The current deployment does **not** collect `meme`, `market`, `listing`, or `prediction`.
+
+Normalized rows keep a row-level `profile` derived from `engine_type`: `news` rows are written with `profile = "news"` and `onchain` rows are written with `profile = "onchain"`.
 
 ## How It Works
 
 1. A systemd timer starts one hourly one-shot service on schedule.
-2. The service runs two `docker compose run --rm opennews-collector` commands sequentially: first `news`, then `onchain`.
+2. The service runs one `docker compose run --rm opennews-collector` command.
 3. The container reads `OPENNEWS_TOKEN` from the project `.env`.
-4. The collector calls `POST /open/news_search` with an `engineTypes` filter.
+4. The collector calls `POST /open/news_search` once with `engineTypes = {"news": [], "onchain": []}`.
 5. News IDs are deduplicated with local state in `/root/trading/data/opennews/state/seen_ids.json`.
 6. Raw pages and normalized records are written to `/root/trading/data/opennews`.
 7. The container exits; there is no long-running collector container.
 
-Paging is adaptive. Each profile starts with a small page limit and increases it only when the current run reaches the limit before seeing old items:
+Paging is adaptive. The combined profile starts with a small page limit and increases it only when the current run reaches the limit before seeing old items:
 
 ```text
 min pages: 3
@@ -59,10 +60,8 @@ The real `.env` file is intentionally ignored by both git and Docker build conte
   raw/YYYY/MM/DD/opennews_<profile>_YYYYMMDD_HHMMSS.json
   state/seen_ids.json
   state/last_run.json
-  state/last_run_news.json
-  state/last_run_onchain.json
-  state/adaptive_news.json
-  state/adaptive_onchain.json
+  state/last_run_combined.json
+  state/adaptive_combined.json
 ```
 
 `raw/` stores API pages exactly as returned by 6551. `normalized/` stores one JSON object per line for downstream processing.
@@ -74,7 +73,7 @@ Each normalized JSONL row contains:
 | Field | Meaning |
 | --- | --- |
 | `id` | Stable OpenNews item ID, or a generated hash when no ID is present |
-| `profile` | Collector profile, currently `news` or `onchain` |
+| `profile` | Row-level profile derived from `engine_type`, currently `news` or `onchain` |
 | `collected_at` | UTC timestamp when this collector saw the item |
 | `event_date` | Date partition derived from item event time |
 | `published_at` | Source publication time when available |
@@ -118,18 +117,20 @@ Rebuild the image after changing `scripts/opennews_collector.py`.
 
 ## Manual Runs
 
-Run the default `news` profile:
+Run the default combined profile:
 
 ```bash
 docker compose run --rm opennews-collector
 ```
 
-Run the `onchain` profile:
+The default command requests `news` and `onchain` in one 6551 API search:
 
 ```bash
 docker compose run --rm opennews-collector \
-  --profile onchain \
+  --profile combined \
+  --engine-type news \
   --engine-type onchain \
+  --split-profile-by-engine \
   --adaptive-pages \
   --min-pages 3 \
   --max-pages 20 \
@@ -139,7 +140,17 @@ docker compose run --rm opennews-collector \
 Run without writing new records:
 
 ```bash
-docker compose run --rm opennews-collector --dry-run --no-raw
+docker compose run --rm opennews-collector \
+  --profile combined \
+  --engine-type news \
+  --engine-type onchain \
+  --split-profile-by-engine \
+  --adaptive-pages \
+  --min-pages 3 \
+  --max-pages 20 \
+  --page-step 2 \
+  --dry-run \
+  --no-raw
 ```
 
 ## systemd Deployment
@@ -159,7 +170,7 @@ Check timer status:
 systemctl list-timers --all --no-pager 'opennews-*.timer'
 ```
 
-Start both profiles manually through systemd:
+Start the combined collector manually through systemd:
 
 ```bash
 systemctl start opennews-hourly.service
@@ -174,10 +185,8 @@ journalctl -u opennews-hourly.service -n 80 --no-pager
 ## Useful State Files
 
 ```bash
-cat /root/trading/data/opennews/state/last_run_news.json
-cat /root/trading/data/opennews/state/last_run_onchain.json
-cat /root/trading/data/opennews/state/adaptive_news.json
-cat /root/trading/data/opennews/state/adaptive_onchain.json
+cat /root/trading/data/opennews/state/last_run_combined.json
+cat /root/trading/data/opennews/state/adaptive_combined.json
 ```
 
 `last_run_*.json` shows what the last run fetched. `adaptive_*.json` shows the current page limit and the next run's page limit.
