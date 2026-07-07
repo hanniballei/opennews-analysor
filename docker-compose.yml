@@ -1,0 +1,24 @@
+services:
+  opennews-collector:
+    build:
+      context: .
+    image: trading-opennews-collector:latest
+    env_file:
+      - .env
+    environment:
+      OPENNEWS_DATA_DIR: /data/opennews
+    command:
+      - --profile
+      - news
+      - --engine-type
+      - news
+      - --adaptive-pages
+      - --min-pages
+      - "3"
+      - --max-pages
+      - "20"
+      - --page-step
+      - "2"
+    volumes:
+      - /root/trading/data/opennews:/data/opennews
+    restart: "no"

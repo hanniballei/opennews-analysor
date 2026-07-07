@@ -1,0 +1,10 @@
+[Unit]
+Description=Run 6551 OpenNews news collector every 30 minutes
+
+[Timer]
+OnCalendar=*-*-* *:00,30:00
+Persistent=true
+Unit=opennews-news.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=6551 OpenNews onchain and market collector
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/trading/news
+ExecStart=/usr/bin/docker compose run --rm opennews-collector --profile signals --engine-type onchain --engine-type market --adaptive-pages --min-pages 3 --max-pages 20 --page-step 2
+TimeoutStartSec=10min

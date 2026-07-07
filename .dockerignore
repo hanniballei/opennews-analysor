@@ -1,0 +1,9 @@
+.env
+*.env.local
+config/*.env
+.git
+.agents
+.codex
+__pycache__/
+*.py[cod]
+.pytest_cache/
