@@ -22,8 +22,9 @@ services:
       - "1"
       - --max-pages
       - "100"
-      - --page-step
-      - "2"
+      - --no-stop-on-known-item
+      - --stop-after-known-pages
+      - "1"
     volumes:
       - /root/trading/data/opennews:/data/opennews
     restart: "no"

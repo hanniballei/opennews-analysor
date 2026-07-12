@@ -6,7 +6,7 @@ The project periodically pulls 6551 OpenNews data, deduplicates items locally, a
 
 ## What It Collects
 
-The installed timer runs one combined request:
+The installed timer runs one combined paginated search:
 
 | Profile | 6551 engines | Schedule | Purpose |
 | --- | --- | --- | --- |
@@ -21,22 +21,21 @@ Normalized rows keep a row-level `profile` derived from `engine_type`: `news` ro
 1. A systemd timer starts one hourly one-shot service on schedule.
 2. The service runs one `docker compose run --rm opennews-collector` command.
 3. The container reads `OPENNEWS_TOKEN` from the project `.env`.
-4. The collector calls `POST /open/news_search` once with `engineTypes = {"news": [], "onchain": []}`.
-5. News IDs are deduplicated with local state in `/root/trading/data/opennews/state/seen_ids.json`.
-6. Raw pages and normalized records are written to `/root/trading/data/opennews`.
+4. Each page calls `POST /open/news_search` with `engineTypes = {"news": [], "onchain": []}`.
+5. Item IDs are deduplicated with local state in `/root/trading/data/opennews/state/seen_ids.json`.
+6. Raw pages, normalized records, and a per-run usage record are written to `/root/trading/data/opennews`.
 7. The container exits; there is no long-running collector container.
 
-Paging is optimized for 6551's point model, where every returned 20 records cost 1 point. The collector uses `limit = 20` so each page maps to one point, starts with one page, and increases the page limit only when the current run reaches the limit before seeing old items:
+Paging is optimized for 6551's point model, where every returned 20 records cost 1 point. The collector uses `limit = 20` so each full page maps to one point. It starts with one page, raises the next run directly to the configured ceiling after a saturated run, and resets only after reaching a full page of IDs that existed before the run:
 
 ```text
 limit: 20
 min pages: 1
-page step: 2
+pages after saturation: 100
 max pages: 100
 ```
 
-This keeps normal runs shallow while still expanding coverage during busy periods.
-When a page contains any already-seen item, the collector processes new items from that page and then stops, assuming the feed is newest-first.
+Duplicates first seen within the current run are counted separately and never confirm a history boundary. The default deployment stops after one fully historical page; `--stop-on-known-item` remains available for explicit manual use but is not used by the timer.
 
 ## Project Layout
 
@@ -60,13 +59,14 @@ The real `.env` file is intentionally ignored by both git and Docker build conte
 /root/trading/data/opennews/
   normalized/YYYY/MM/DD.jsonl
   raw/YYYY/MM/DD/opennews_<profile>_YYYYMMDD_HHMMSS.json
+  usage/YYYY/MM/DD.jsonl
   state/seen_ids.json
   state/last_run.json
   state/last_run_combined.json
   state/adaptive_combined.json
 ```
 
-`raw/` stores API pages exactly as returned by 6551. `normalized/` stores one JSON object per line for downstream processing.
+`raw/` stores each API page's item payload plus all non-`data` response metadata. `normalized/` stores one JSON object per line for downstream processing. `usage/` stores one summary per successful run, including `points_used`, boundary status, page saturation, duplicates, requested engines with no returned records, and the fetched time range.
 
 ## Normalized Fields
 
@@ -137,7 +137,8 @@ docker compose run --rm opennews-collector \
   --limit 20 \
   --min-pages 1 \
   --max-pages 100 \
-  --page-step 2
+  --no-stop-on-known-item \
+  --stop-after-known-pages 1
 ```
 
 Run without writing new records:
@@ -152,12 +153,46 @@ docker compose run --rm opennews-collector \
   --limit 20 \
   --min-pages 1 \
   --max-pages 100 \
-  --page-step 2 \
+  --no-stop-on-known-item \
+  --stop-after-known-pages 1 \
   --dry-run \
   --no-raw
 ```
 
 `--dry-run` still calls 6551 and may consume points; it only skips local writes.
+
+Run a bounded 2,000-record recovery scan without changing the combined adaptive state:
+
+```bash
+docker compose run --rm opennews-collector \
+  --profile backfill \
+  --engine-type news \
+  --engine-type onchain \
+  --split-profile-by-engine \
+  --limit 20 \
+  --max-pages 100 \
+  --no-stop-on-known-item \
+  --stop-after-known-pages 0
+```
+
+This scan costs at most 100 points under the documented point model.
+
+Continue a recovery scan without paying for earlier pages again:
+
+```bash
+docker compose run --rm opennews-collector \
+  --profile backfill \
+  --engine-type news \
+  --engine-type onchain \
+  --split-profile-by-engine \
+  --limit 20 \
+  --start-page 91 \
+  --max-pages 410 \
+  --no-stop-on-known-item \
+  --stop-after-known-pages 0
+```
+
+This example deliberately overlaps pages 91-100 and then scans through page 500. It costs at most 410 points and covers the API's current 10,000-record search window.
 
 ## systemd Deployment
 
@@ -193,9 +228,18 @@ journalctl -u opennews-hourly.service -n 80 --no-pager
 ```bash
 cat /root/trading/data/opennews/state/last_run_combined.json
 cat /root/trading/data/opennews/state/adaptive_combined.json
+tail -n 1 /root/trading/data/opennews/usage/$(date -u +%Y/%m/%d).jsonl
 ```
 
-`last_run_*.json` shows what the last run fetched. `adaptive_*.json` shows the current page limit and the next run's page limit.
+`last_run_*.json` shows what the last run fetched. `adaptive_*.json` shows the current and next page limits. A run with `saturated = true` did not confirm a historical or empty-page boundary and should be monitored until a later run reports `boundary_confirmed = true`.
+
+## Tests
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+The boundary tests cover same-run duplicates, historical IDs, fully historical pages, point accounting, recovery page offsets, and saturated-run recovery.
 
 ## Downstream Reading Tips
 

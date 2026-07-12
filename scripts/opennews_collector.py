@@ -23,6 +23,7 @@ DEFAULT_API_BASE_URL = "https://ai.6551.io"
 DEFAULT_DATA_DIR = "/root/trading/data/opennews"
 MAX_LIMIT = 100
 DEFAULT_LIMIT = 20
+POINT_RECORDS = 20
 
 
 def utc_now() -> datetime:
@@ -207,6 +208,20 @@ def append_jsonl_by_date(root: Path, rows: list[dict[str, Any]]) -> None:
                 fh.write("\n")
 
 
+def append_usage_record(root: Path, collected_at: datetime, summary: dict[str, Any]) -> None:
+    path = (
+        root
+        / "usage"
+        / collected_at.strftime("%Y")
+        / collected_at.strftime("%m")
+        / f"{collected_at:%d}.jsonl"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(summary, ensure_ascii=False, sort_keys=True))
+        fh.write("\n")
+
+
 def safe_name(value: str) -> str:
     return "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in value)
 
@@ -245,7 +260,7 @@ def next_page_limit(
         return args.max_pages
     if stopped_on_known_page or stopped_on_empty_page:
         return max(args.min_pages, min(args.max_pages, pages_fetched + 1))
-    return min(args.max_pages, page_limit + args.page_step)
+    return args.max_pages
 
 
 def collect(args: argparse.Namespace) -> dict[str, Any]:
@@ -274,12 +289,17 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
             }
 
         collected_at = utc_now()
-        seen_ids = load_seen_ids(seen_path)
+        historical_seen_ids = load_seen_ids(seen_path)
+        seen_ids = set(historical_seen_ids)
         new_rows: list[dict[str, Any]] = []
         counts_by_engine: dict[str, int] = defaultdict(int)
+        fetched_counts_by_engine: dict[str, int] = defaultdict(int)
         counts_by_profile: dict[str, int] = defaultdict(int)
         raw_pages: list[dict[str, Any]] = []
         pages_fetched = 0
+        points_used = 0
+        historical_items = 0
+        intra_run_duplicates = 0
         known_pages = 0
         stopped_on_known_page = False
         stopped_on_known_item = False
@@ -287,8 +307,10 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
         api_url = f"{api_base_url}/open/news_search"
         engine_types = build_engine_types(args.engine_type)
         page_limit = current_page_limit(args, adaptive_path)
+        oldest_fetched_at: datetime | None = None
+        newest_fetched_at: datetime | None = None
 
-        for page in range(1, page_limit + 1):
+        for page in range(args.start_page, args.start_page + page_limit):
             body = {"limit": args.limit, "page": page}
             if engine_types:
                 body["engineTypes"] = engine_types
@@ -298,39 +320,56 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
                 raise RuntimeError(f"OpenNews API returned unexpected data field: {type(items).__name__}")
 
             pages_fetched += 1
-            raw_pages.append(
-                {
-                    "page": page,
-                    "request": body,
-                    "total": result.get("total"),
-                    "count": len(items),
-                    "data": items,
-                }
-            )
+            points_used += (len(items) + POINT_RECORDS - 1) // POINT_RECORDS
+            raw_page = {
+                "page": page,
+                "request": body,
+                "total": result.get("total"),
+                "count": len(items),
+                "points_used": (len(items) + POINT_RECORDS - 1) // POINT_RECORDS,
+                "data": items,
+                "response_meta": {key: value for key, value in result.items() if key != "data"},
+            }
+            raw_pages.append(raw_page)
 
             page_new = 0
-            page_known_items = 0
+            page_historical_items = 0
+            page_intra_run_duplicates = 0
             for item in items:
                 if not isinstance(item, dict):
                     continue
                 item_id = stable_item_id(item)
+                item_engine_type = str(item.get("engine_type") or item.get("engineType") or "")
+                fetched_counts_by_engine[item_engine_type] += 1
+                event_time = parse_event_time(item, collected_at)
+                oldest_fetched_at = event_time if oldest_fetched_at is None else min(oldest_fetched_at, event_time)
+                newest_fetched_at = event_time if newest_fetched_at is None else max(newest_fetched_at, event_time)
+                if item_id in historical_seen_ids:
+                    page_historical_items += 1
+                    historical_items += 1
+                    continue
                 if item_id in seen_ids:
-                    page_known_items += 1
+                    intra_run_duplicates += 1
+                    page_intra_run_duplicates += 1
                     continue
                 seen_ids.add(item_id)
                 item_profile = profile_for_item(item, args)
                 new_rows.append(normalize_item(item, item_id, collected_at, item_profile))
-                counts_by_engine[str(item.get("engine_type") or item.get("engineType") or "")] += 1
+                counts_by_engine[item_engine_type] += 1
                 counts_by_profile[item_profile] += 1
                 page_new += 1
+
+            raw_page["new_items"] = page_new
+            raw_page["historical_items"] = page_historical_items
+            raw_page["intra_run_duplicates"] = page_intra_run_duplicates
 
             if not items:
                 stopped_on_empty_page = True
                 break
-            if args.stop_on_known_item and page_known_items > 0:
+            if args.stop_on_known_item and page_historical_items > 0:
                 stopped_on_known_item = True
                 break
-            if page_new == 0:
+            if page_new == 0 and page_historical_items > 0:
                 known_pages += 1
             else:
                 known_pages = 0
@@ -345,6 +384,13 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
             stopped_on_known_page or stopped_on_known_item,
             stopped_on_empty_page,
         )
+        boundary_confirmed = stopped_on_known_item or stopped_on_known_page or stopped_on_empty_page
+        saturated = pages_fetched >= page_limit and not boundary_confirmed
+        missing_requested_engines = sorted(
+            engine_type
+            for engine_type in args.engine_type
+            if fetched_counts_by_engine.get(engine_type, 0) == 0
+        )
         raw_path = None
         if args.write_raw:
             raw_path = write_raw_run(
@@ -356,8 +402,19 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
                     "collected_at": iso_utc(collected_at),
                     "api_base_url": api_base_url,
                     "engine_types": engine_types,
+                    "start_page": args.start_page,
                     "page_limit": page_limit,
                     "pages_fetched": pages_fetched,
+                    "points_used": points_used,
+                    "new_items": len(new_rows),
+                    "fetched_counts_by_engine": dict(sorted(fetched_counts_by_engine.items())),
+                    "missing_requested_engines": missing_requested_engines,
+                    "historical_items": historical_items,
+                    "intra_run_duplicates": intra_run_duplicates,
+                    "boundary_confirmed": boundary_confirmed,
+                    "saturated": saturated,
+                    "oldest_fetched_at": iso_utc(oldest_fetched_at) if oldest_fetched_at else None,
+                    "newest_fetched_at": iso_utc(newest_fetched_at) if newest_fetched_at else None,
                     "pages": raw_pages,
                 },
             )
@@ -375,6 +432,13 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
                     "page_limit": page_limit,
                     "next_pages": next_pages,
                     "pages_fetched": pages_fetched,
+                    "points_used": points_used,
+                    "fetched_counts_by_engine": dict(sorted(fetched_counts_by_engine.items())),
+                    "missing_requested_engines": missing_requested_engines,
+                    "historical_items": historical_items,
+                    "intra_run_duplicates": intra_run_duplicates,
+                    "boundary_confirmed": boundary_confirmed,
+                    "saturated": saturated,
                     "stopped_on_known_page": stopped_on_known_page,
                     "stopped_on_known_item": stopped_on_known_item,
                     "stopped_on_empty_page": stopped_on_empty_page,
@@ -387,20 +451,39 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
             "profile": args.profile,
             "engine_types": engine_types,
             "collected_at": iso_utc(collected_at),
+            "start_page": args.start_page,
             "page_limit": page_limit,
             "next_pages": next_pages,
             "pages_fetched": pages_fetched,
+            "points_used": points_used,
+            "historical_items": historical_items,
+            "intra_run_duplicates": intra_run_duplicates,
+            "boundary_confirmed": boundary_confirmed,
+            "saturated": saturated,
             "stopped_on_known_item": stopped_on_known_item,
             "stopped_on_known_page": stopped_on_known_page,
             "stopped_on_empty_page": stopped_on_empty_page,
             "new_items": len(new_rows),
             "counts_by_engine": dict(sorted(counts_by_engine.items())),
+            "fetched_counts_by_engine": dict(sorted(fetched_counts_by_engine.items())),
+            "missing_requested_engines": missing_requested_engines,
             "counts_by_profile": dict(sorted(counts_by_profile.items())),
             "seen_ids": len(seen_ids),
+            "oldest_fetched_at": iso_utc(oldest_fetched_at) if oldest_fetched_at else None,
+            "newest_fetched_at": iso_utc(newest_fetched_at) if newest_fetched_at else None,
             "raw_path": str(raw_path) if raw_path else None,
             "data_dir": str(data_dir),
         }
         if not args.dry_run:
+            usage_path = (
+                data_dir
+                / "usage"
+                / collected_at.strftime("%Y")
+                / collected_at.strftime("%m")
+                / f"{collected_at:%d}.jsonl"
+            )
+            summary["usage_path"] = str(usage_path)
+            append_usage_record(data_dir, collected_at, summary)
             atomic_write_json(last_run_path, summary)
             atomic_write_json(profile_last_run_path, summary)
         return summary
@@ -414,21 +497,21 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--engine-type", action="append", default=[])
     parser.add_argument("--split-profile-by-engine", action="store_true")
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
+    parser.add_argument("--start-page", type=int, default=1)
     parser.add_argument("--max-pages", type=int, default=20)
     parser.add_argument("--min-pages", type=int, default=3)
-    parser.add_argument("--page-step", type=int, default=2)
     parser.add_argument("--adaptive-pages", action="store_true")
     parser.add_argument("--timeout", type=int, default=30)
     parser.add_argument("--seen-retention", type=int, default=250_000)
     parser.add_argument("--stop-after-known-pages", type=int, default=1)
-    parser.add_argument("--stop-on-known-item", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--stop-on-known-item", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--no-raw", action="store_false", dest="write_raw")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     args.limit = max(1, min(args.limit, MAX_LIMIT))
+    args.start_page = max(1, args.start_page)
     args.max_pages = max(1, args.max_pages)
     args.min_pages = max(1, min(args.min_pages, args.max_pages))
-    args.page_step = max(1, args.page_step)
     args.timeout = max(1, args.timeout)
     return args
 
@@ -442,6 +525,31 @@ def main(argv: list[str]) -> int:
         return 1
 
     summary["elapsed_seconds"] = round(time.monotonic() - start, 3)
+    if summary.get("saturated"):
+        print(
+            json.dumps(
+                {
+                    "warning": "page limit reached before a historical or empty-page boundary",
+                    "page_limit": summary["page_limit"],
+                    "next_pages": summary["next_pages"],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+    if summary.get("missing_requested_engines"):
+        print(
+            json.dumps(
+                {
+                    "warning": "requested engines returned no records",
+                    "missing_requested_engines": summary["missing_requested_engines"],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
     return 0
 

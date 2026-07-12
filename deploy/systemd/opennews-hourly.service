@@ -3,9 +3,13 @@ Description=6551 OpenNews hourly collectors
 Requires=docker.service
 After=docker.service network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=15min
+StartLimitBurst=3
 
 [Service]
 Type=oneshot
 WorkingDirectory=/root/trading/news
 ExecStart=/usr/bin/docker compose run --rm opennews-collector
 TimeoutStartSec=20min
+Restart=on-failure
+RestartSec=2min
