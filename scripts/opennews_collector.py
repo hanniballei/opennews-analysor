@@ -314,6 +314,8 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
             body = {"limit": args.limit, "page": page}
             if engine_types:
                 body["engineTypes"] = engine_types
+            if args.min_score is not None:
+                body["score"] = args.min_score
             result = post_json(api_url, token, body, args.timeout)
             items = result.get("data", [])
             if not isinstance(items, list):
@@ -402,6 +404,7 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
                     "collected_at": iso_utc(collected_at),
                     "api_base_url": api_base_url,
                     "engine_types": engine_types,
+                    "min_score": args.min_score,
                     "start_page": args.start_page,
                     "page_limit": page_limit,
                     "pages_fetched": pages_fetched,
@@ -428,6 +431,7 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
                 adaptive_path,
                 {
                     "profile": args.profile,
+                    "min_score": args.min_score,
                     "updated_at": iso_utc(utc_now()),
                     "page_limit": page_limit,
                     "next_pages": next_pages,
@@ -450,6 +454,7 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
             "dry_run": args.dry_run,
             "profile": args.profile,
             "engine_types": engine_types,
+            "min_score": args.min_score,
             "collected_at": iso_utc(collected_at),
             "start_page": args.start_page,
             "page_limit": page_limit,
@@ -496,6 +501,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--profile", default="default")
     parser.add_argument("--engine-type", action="append", default=[])
     parser.add_argument("--split-profile-by-engine", action="store_true")
+    parser.add_argument("--min-score", type=int)
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
     parser.add_argument("--start-page", type=int, default=1)
     parser.add_argument("--max-pages", type=int, default=20)
@@ -509,6 +515,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     args.limit = max(1, min(args.limit, MAX_LIMIT))
+    if args.min_score is not None:
+        args.min_score = max(0, min(args.min_score, 100))
     args.start_page = max(1, args.start_page)
     args.max_pages = max(1, args.max_pages)
     args.min_pages = max(1, min(args.min_pages, args.max_pages))

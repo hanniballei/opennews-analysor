@@ -1,5 +1,5 @@
 [Unit]
-Description=6551 OpenNews hourly collectors
+Description=6551 OpenNews score-filtered news collector
 Requires=docker.service
 After=docker.service network-online.target
 Wants=network-online.target

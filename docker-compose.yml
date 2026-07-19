@@ -9,12 +9,12 @@ services:
       OPENNEWS_DATA_DIR: /data/opennews
     command:
       - --profile
-      - combined
+      - news-score-50
       - --engine-type
       - news
-      - --engine-type
-      - onchain
       - --split-profile-by-engine
+      - --min-score
+      - "50"
       - --adaptive-pages
       - --limit
       - "20"

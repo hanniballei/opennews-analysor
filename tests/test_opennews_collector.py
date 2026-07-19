@@ -198,6 +198,41 @@ class CollectorBoundaryTests(unittest.TestCase):
         self.assertEqual(summary["fetched_counts_by_engine"], {"news": 1})
         self.assertEqual(summary["missing_requested_engines"], ["onchain"])
 
+    def test_min_score_is_sent_and_recorded(self):
+        responses = {1: {"data": [], "total": 0}}
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        data_dir = Path(temp_dir.name)
+        args = collector.parse_args(
+            [
+                "--data-dir",
+                str(data_dir),
+                "--profile",
+                "score-50",
+                "--limit",
+                "2",
+                "--min-score",
+                "50",
+                "--no-raw",
+            ]
+        )
+        request_bodies: list[dict] = []
+
+        def fake_post_json(url, token, body, timeout):
+            request_bodies.append(body)
+            return responses[body["page"]]
+
+        with mock.patch.dict(
+            os.environ,
+            {"OPENNEWS_TOKEN": "test-token", "OPENNEWS_DATA_DIR": str(data_dir)},
+            clear=False,
+        ):
+            with mock.patch.object(collector, "post_json", side_effect=fake_post_json):
+                summary = collector.collect(args)
+
+        self.assertEqual(request_bodies, [{"limit": 2, "page": 1, "score": 50}])
+        self.assertEqual(summary["min_score"], 50)
+
 
 if __name__ == "__main__":
     unittest.main()

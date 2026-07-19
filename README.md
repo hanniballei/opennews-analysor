@@ -6,22 +6,22 @@ The project periodically pulls 6551 OpenNews data, deduplicates items locally, a
 
 ## What It Collects
 
-The installed timer runs one combined paginated search:
+The installed timer runs one paginated news search:
 
 | Profile | 6551 engines | Schedule | Purpose |
 | --- | --- | --- | --- |
-| `combined` | `news`, `onchain` | Hourly at `:00` | News plus on-chain whale trade and large position events |
+| `news-score-50` | `news` | Hourly at `:00` | Market news with AI score at least 50 |
 
-The current deployment does **not** collect `meme`, `market`, `listing`, or `prediction`.
+The current deployment does **not** collect `onchain`, `meme`, `market`, `listing`, or `prediction`.
 
-Normalized rows keep a row-level `profile` derived from `engine_type`: `news` rows are written with `profile = "news"` and `onchain` rows are written with `profile = "onchain"`.
+Normalized rows keep a row-level `profile` derived from `engine_type`: collected rows are written with `profile = "news"`.
 
 ## How It Works
 
 1. A systemd timer starts one hourly one-shot service on schedule.
 2. The service runs one `docker compose run --rm opennews-collector` command.
 3. The container reads `OPENNEWS_TOKEN` from the project `.env`.
-4. Each page calls `POST /open/news_search` with `engineTypes = {"news": [], "onchain": []}`.
+4. Each page calls `POST /open/news_search` with `engineTypes = {"news": []}` and `score = 50`.
 5. Item IDs are deduplicated with local state in `/root/trading/data/opennews/state/seen_ids.json`.
 6. Raw pages, normalized records, and a per-run usage record are written to `/root/trading/data/opennews`.
 7. The container exits; there is no long-running collector container.
@@ -36,6 +36,8 @@ max pages: 100
 ```
 
 Duplicates first seen within the current run are counted separately and never confirm a history boundary. The default deployment stops after one fully historical page; `--stop-on-known-item` remains available for explicit manual use but is not used by the timer.
+
+The public OpenNews search API supports a numeric minimum `score` filter but does not document a single-query option for `score >= 50 OR score is missing`. The installed deployment therefore requests only news with `score >= 50`.
 
 ## Project Layout
 
@@ -62,8 +64,8 @@ The real `.env` file is intentionally ignored by both git and Docker build conte
   usage/YYYY/MM/DD.jsonl
   state/seen_ids.json
   state/last_run.json
-  state/last_run_combined.json
-  state/adaptive_combined.json
+  state/last_run_news-score-50.json
+  state/adaptive_news-score-50.json
 ```
 
 `raw/` stores each API page's item payload plus all non-`data` response metadata. `normalized/` stores one JSON object per line for downstream processing. `usage/` stores one summary per successful run, including `points_used`, boundary status, page saturation, duplicates, requested engines with no returned records, and the fetched time range.
@@ -75,13 +77,13 @@ Each normalized JSONL row contains:
 | Field | Meaning |
 | --- | --- |
 | `id` | Stable OpenNews item ID, or a generated hash when no ID is present |
-| `profile` | Row-level profile derived from `engine_type`, currently `news` or `onchain` |
+| `profile` | Row-level profile derived from `engine_type`, currently `news` |
 | `collected_at` | UTC timestamp when this collector saw the item |
 | `event_date` | Date partition derived from item event time |
 | `published_at` | Source publication time when available |
 | `created_at` | 6551/source creation time when available |
 | `source` | Source name such as `Reuters`, `Bloomberg`, `jin10`, `binance`, etc. |
-| `engine_type` | 6551 engine, for example `news`, `onchain`, or `market` |
+| `engine_type` | 6551 engine, currently `news` |
 | `title` / `text` | Headline or text content |
 | `link` | Source or preview URL when available |
 | `assets` | Related symbols/assets parsed from the original `coins` field |
@@ -119,20 +121,20 @@ Rebuild the image after changing `scripts/opennews_collector.py`.
 
 ## Manual Runs
 
-Run the default combined profile:
+Run the default score-filtered news profile:
 
 ```bash
 docker compose run --rm opennews-collector
 ```
 
-The default command requests `news` and `onchain` in one 6551 API search:
+The default command requests `news` with `score >= 50` in one 6551 API search:
 
 ```bash
 docker compose run --rm opennews-collector \
-  --profile combined \
+  --profile news-score-50 \
   --engine-type news \
-  --engine-type onchain \
   --split-profile-by-engine \
+  --min-score 50 \
   --adaptive-pages \
   --limit 20 \
   --min-pages 1 \
@@ -145,10 +147,10 @@ Run without writing new records:
 
 ```bash
 docker compose run --rm opennews-collector \
-  --profile combined \
+  --profile news-score-50 \
   --engine-type news \
-  --engine-type onchain \
   --split-profile-by-engine \
+  --min-score 50 \
   --adaptive-pages \
   --limit 20 \
   --min-pages 1 \
@@ -161,14 +163,14 @@ docker compose run --rm opennews-collector \
 
 `--dry-run` still calls 6551 and may consume points; it only skips local writes.
 
-Run a bounded 2,000-record recovery scan without changing the combined adaptive state:
+Run a bounded 2,000-record score-filtered recovery scan without changing the default adaptive state:
 
 ```bash
 docker compose run --rm opennews-collector \
-  --profile backfill \
+  --profile backfill-score-50 \
   --engine-type news \
-  --engine-type onchain \
   --split-profile-by-engine \
+  --min-score 50 \
   --limit 20 \
   --max-pages 100 \
   --no-stop-on-known-item \
@@ -181,10 +183,10 @@ Continue a recovery scan without paying for earlier pages again:
 
 ```bash
 docker compose run --rm opennews-collector \
-  --profile backfill \
+  --profile backfill-score-50 \
   --engine-type news \
-  --engine-type onchain \
   --split-profile-by-engine \
+  --min-score 50 \
   --limit 20 \
   --start-page 91 \
   --max-pages 410 \
@@ -211,7 +213,7 @@ Check timer status:
 systemctl list-timers --all --no-pager 'opennews-*.timer'
 ```
 
-Start the combined collector manually through systemd:
+Start the score-filtered collector manually through systemd:
 
 ```bash
 systemctl start opennews-hourly.service
@@ -226,8 +228,8 @@ journalctl -u opennews-hourly.service -n 80 --no-pager
 ## Useful State Files
 
 ```bash
-cat /root/trading/data/opennews/state/last_run_combined.json
-cat /root/trading/data/opennews/state/adaptive_combined.json
+cat /root/trading/data/opennews/state/last_run_news-score-50.json
+cat /root/trading/data/opennews/state/adaptive_news-score-50.json
 tail -n 1 /root/trading/data/opennews/usage/$(date -u +%Y/%m/%d).jsonl
 ```
 
@@ -239,7 +241,7 @@ tail -n 1 /root/trading/data/opennews/usage/$(date -u +%Y/%m/%d).jsonl
 python3 -m unittest discover -s tests -v
 ```
 
-The boundary tests cover same-run duplicates, historical IDs, fully historical pages, point accounting, recovery page offsets, and saturated-run recovery.
+The tests cover same-run duplicates, historical IDs, fully historical pages, point accounting, recovery page offsets, saturated-run recovery, and score-filtered request construction.
 
 ## Downstream Reading Tips
 
@@ -250,11 +252,6 @@ For U.S. stock and macro use cases, start with:
 - `source` in higher-signal sources such as `Reuters`, `Bloomberg`, `6551Tradfi`, `6551News`, `jin10`, `CNBC`, `Financial Times`, `Fox Business`, `Nasdaq`, `GlobeNewswire`, `PRNewswire`, or `Business Wire`
 - `assets` containing stock tickers or internal `XYZ-*` asset tags
 - `score`, `grade`, and `signal` for priority ranking
-
-For on-chain signals, use:
-
-- `profile = onchain`
-- `engine_type = onchain`
 
 ## Git And Secrets
 

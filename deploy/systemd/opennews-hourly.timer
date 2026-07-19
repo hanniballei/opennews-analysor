@@ -1,5 +1,5 @@
 [Unit]
-Description=Run 6551 OpenNews news and onchain collectors hourly
+Description=Run 6551 OpenNews score-filtered news collector hourly
 
 [Timer]
 OnCalendar=*-*-* *:00:00
