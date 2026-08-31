@@ -1,20 +1,26 @@
+x-opennews-common: &opennews-common
+  build:
+    context: .
+  image: trading-opennews-collector:latest
+  env_file:
+    - .env
+  environment:
+    OPENNEWS_DATA_DIR: /data/opennews
+  volumes:
+    - /root/trading/data/opennews:/data/opennews
+  restart: "no"
+
 services:
-  opennews-collector:
-    build:
-      context: .
-    image: trading-opennews-collector:latest
-    env_file:
-      - .env
-    environment:
-      OPENNEWS_DATA_DIR: /data/opennews
+  opennews-news-collector:
+    <<: *opennews-common
     command:
       - --profile
-      - news-score-50
+      - news-score-80
       - --engine-type
       - news
       - --split-profile-by-engine
       - --min-score
-      - "50"
+      - "80"
       - --adaptive-pages
       - --limit
       - "20"
@@ -25,6 +31,24 @@ services:
       - --no-stop-on-known-item
       - --stop-after-known-pages
       - "1"
-    volumes:
-      - /root/trading/data/opennews:/data/opennews
-    restart: "no"
+
+  opennews-listing-collector:
+    <<: *opennews-common
+    command:
+      - --profile
+      - listing-all
+      - --engine-type
+      - listing
+      - --split-profile-by-engine
+      - --adaptive-pages
+      - --limit
+      - "100"
+      - --min-pages
+      - "1"
+      - --initial-pages
+      - "100"
+      - --max-pages
+      - "100"
+      - --no-stop-on-known-item
+      - --stop-after-known-pages
+      - "1"

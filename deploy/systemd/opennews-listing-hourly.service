@@ -1,5 +1,5 @@
 [Unit]
-Description=6551 OpenNews score-filtered news collector
+Description=6551 OpenNews unfiltered listing collector
 Requires=docker.service
 After=docker.service network-online.target
 Wants=network-online.target
@@ -9,7 +9,7 @@ StartLimitBurst=3
 [Service]
 Type=oneshot
 WorkingDirectory=/root/trading/news
-ExecStart=/usr/bin/docker compose run --rm opennews-news-collector
+ExecStart=/usr/bin/docker compose run --rm opennews-listing-collector
 TimeoutStartSec=20min
 Restart=on-failure
 RestartSec=2min
