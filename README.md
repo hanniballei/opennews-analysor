@@ -11,13 +11,15 @@ The installed timer runs two paginated searches:
 | Profile | 6551 engines | Schedule | Purpose |
 | --- | --- | --- | --- |
 | `news-score-80` | `news` | Hourly at `:00` | Market news with AI score at least 80 |
-| `listing-all` | `listing` | Hourly at `:02` | All exchange listing/delisting events without a score filter |
+| `listing-all` | `listing` | Hourly at `:02` | All listing-engine exchange messages without a score filter |
 
 The current deployment does **not** collect `onchain`, `meme`, `market`, or `prediction`.
 
 Normalized rows keep a row-level `profile` derived from `engine_type`: rows are written with `profile = "news"` or `profile = "listing"`.
 
 Long or multi-line news text is enriched separately with DeepSeek at `:05`. The enrichment service writes a concise Chinese display title to the existing SQLite `title` field, records `title_source = "deepseek"`, and writes a Chinese summary to `summary_zh`. It never changes `text`, `raw_json`, raw snapshots, or normalized JSONL archives.
+
+At `:07`, a second independent DeepSeek service classifies every newly collected listing-engine message. Confirmed exchange listing, delisting, pair, derivative, collateral, Alpha, tokenized-stock, and trading-status events are written to structured `listing_events` and `listing_event_sources` tables. Non-events remain only in the source `items` table and raw archives.
 
 ## How It Works
 
@@ -31,6 +33,7 @@ Long or multi-line news text is enriched separately with DeepSeek at `:05`. The 
 8. The containers exit; there is no long-running collector container.
 9. At `:05`, an independent one-shot service selects eligible news from each collection window whose text exceeds 160 characters or contains multiple lines, then sends them to DeepSeek in bounded batches.
 10. DeepSeek failures are retried independently and never cause the news collector to rerun or mark collection as failed.
+11. At `:07`, listing messages collected at `:02` are classified in their own durable window. The cursor advances only after every message is validated, so retries cannot skip rows.
 
 Paging follows 6551's point model, where every returned 20 records cost 1 point. News uses `limit = 20` for one point per full page. Listing uses `limit = 100` so the API's 100-page cap can still expose the full 10,000-record window. Each adaptive profile raises the next run to its configured ceiling after a saturated run and resets only after reaching a full page of IDs that existed before the run:
 
@@ -53,13 +56,17 @@ The public OpenNews search API supports one numeric minimum `score` filter per r
   Dockerfile
   docker-compose.yml
   scripts/opennews_collector.py
+  scripts/opennews_ai.py
   scripts/opennews_enricher.py
+  scripts/opennews_listing_enricher.py
   deploy/systemd/opennews-hourly.service
   deploy/systemd/opennews-hourly.timer
   deploy/systemd/opennews-listing-hourly.service
   deploy/systemd/opennews-listing-hourly.timer
   deploy/systemd/opennews-news-enrichment-hourly.service
   deploy/systemd/opennews-news-enrichment-hourly.timer
+  deploy/systemd/opennews-listing-enrichment-hourly.service
+  deploy/systemd/opennews-listing-enrichment-hourly.timer
   .env.example
   .gitignore
   .dockerignore
@@ -83,9 +90,12 @@ The real `.env` file is intentionally ignored by both git and Docker build conte
   state/last_run_listing-all.json
   state/adaptive_listing-all.json
   state/news_enrichment.json
+  state/listing_enrichment.json
 ```
 
 `databases/news.sqlite3` and `databases/listing.sqlite3` are the current query stores. Each database has one `items` table keyed by the upstream item ID, with structured columns plus the normalized and raw JSON payloads. The two databases deliberately allow the same upstream ID to exist independently.
+
+`databases/listing.sqlite3` additionally contains `listing_events`, keyed by a deterministic event fingerprint, and `listing_event_sources`, keyed by the original listing item ID. Multiple messages about the same exchange action therefore produce one event while retaining every source item and model payload. Events with no explicit asset or pair remain separate and set `requires_link_fetch = 1` instead of guessing.
 
 `raw/` stores each API page's item payload plus all non-`data` response metadata. `normalized/` remains an append-only JSONL archive. `usage/` stores one summary per successful run, including `points_used`, boundary status, page saturation, duplicates, requested engines with no returned records, database writes, and the fetched time range.
 
@@ -145,12 +155,14 @@ OPENNEWS_DATA_DIR=/root/trading/data/opennews
 OPENNEWS_API_BASE_URL=https://ai.6551.io
 DEEPSEEK_API_KEY=replace_with_your_deepseek_api_key
 DEEPSEEK_API_BASE_URL=https://api.deepseek.com
-DEEPSEEK_MODEL=deepseek-chat
+DEEPSEEK_MODEL=deepseek-v4-flash
 ```
 
 The container maps the host data directory to `/data/opennews` and overrides `OPENNEWS_DATA_DIR` inside the container.
 
 `DEEPSEEK_API_KEY` is required only by the enrichment service. The collector services continue to work when DeepSeek is unavailable or the key is absent.
+
+The enrichment request uses `deepseek-v4-flash` with thinking enabled at `high` reasoning effort and a 32,768-token output limit. Sampling temperature is omitted because DeepSeek ignores it in thinking mode. Empty or invalid JSON responses are retried up to three times. A response ending with `finish_reason = "length"` is not written; the batch is split in half and retried, while a truncated single-item batch fails without advancing the enrichment cursor.
 
 ## Build
 
@@ -269,6 +281,14 @@ docker compose run --rm opennews-news-enricher
 
 On its first run, the enricher starts with the latest completed news collection instead of backfilling the full historical database. It advances a durable collection cursor only after every eligible row in the window succeeds, so retries cannot permanently skip older rows. Short headline-like text remains unchanged with `title_source = "text"`. Existing upstream titles and Chinese summaries are preserved, and a later collector refresh cannot overwrite a generated title or summary.
 
+Run structured listing-event extraction manually:
+
+```bash
+docker compose run --rm opennews-listing-enricher
+```
+
+The listing enricher processes every new listing-engine message because the current volume is small enough to avoid a brittle keyword prefilter. It requires exact source evidence for every confirmed event, treats `assets_json` only as hints, and marks incomplete announcements for later link fetching.
+
 ## systemd Deployment
 
 Install or update the timers:
@@ -280,10 +300,13 @@ cp deploy/systemd/opennews-listing-hourly.service /etc/systemd/system/
 cp deploy/systemd/opennews-listing-hourly.timer /etc/systemd/system/
 cp deploy/systemd/opennews-news-enrichment-hourly.service /etc/systemd/system/
 cp deploy/systemd/opennews-news-enrichment-hourly.timer /etc/systemd/system/
+cp deploy/systemd/opennews-listing-enrichment-hourly.service /etc/systemd/system/
+cp deploy/systemd/opennews-listing-enrichment-hourly.timer /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now opennews-hourly.timer
 systemctl enable --now opennews-listing-hourly.timer
 systemctl enable --now opennews-news-enrichment-hourly.timer
+systemctl enable --now opennews-listing-enrichment-hourly.timer
 ```
 
 Check timer status:
@@ -298,6 +321,7 @@ Start either collector manually through systemd:
 systemctl start opennews-hourly.service
 systemctl start opennews-listing-hourly.service
 systemctl start opennews-news-enrichment-hourly.service
+systemctl start opennews-listing-enrichment-hourly.service
 ```
 
 Read service logs:
@@ -306,6 +330,7 @@ Read service logs:
 journalctl -u opennews-hourly.service -n 80 --no-pager
 journalctl -u opennews-listing-hourly.service -n 80 --no-pager
 journalctl -u opennews-news-enrichment-hourly.service -n 80 --no-pager
+journalctl -u opennews-listing-enrichment-hourly.service -n 80 --no-pager
 ```
 
 ## Useful State Files
@@ -315,6 +340,8 @@ cat /root/trading/data/opennews/state/last_run_news-score-80.json
 cat /root/trading/data/opennews/state/adaptive_news-score-80.json
 cat /root/trading/data/opennews/state/last_run_listing-all.json
 cat /root/trading/data/opennews/state/adaptive_listing-all.json
+cat /root/trading/data/opennews/state/news_enrichment.json
+cat /root/trading/data/opennews/state/listing_enrichment.json
 tail -n 1 /root/trading/data/opennews/usage/$(date -u +%Y/%m/%d).jsonl
 ```
 
@@ -326,7 +353,7 @@ tail -n 1 /root/trading/data/opennews/usage/$(date -u +%Y/%m/%d).jsonl
 python3 -m unittest discover -s tests -v
 ```
 
-The tests cover same-run duplicates, historical IDs, fully historical pages, point accounting, recovery page offsets, saturated-run recovery, score-filtered request construction, DeepSeek response validation, enrichment updates, and preservation of generated display fields during later collector refreshes.
+The tests cover same-run duplicates, historical IDs, fully historical pages, point accounting, recovery page offsets, saturated-run recovery, score-filtered request construction, DeepSeek response validation and truncation recovery, news enrichment updates, listing-event classification and deduplication, source retention, durable cursors, and preservation of generated fields during later collector refreshes.
 
 ## Downstream Reading Tips
 

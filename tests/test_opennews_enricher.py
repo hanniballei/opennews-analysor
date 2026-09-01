@@ -100,6 +100,122 @@ class OpenNewsEnricherTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "IDs did not match"):
             enricher.parse_enrichments(response, {"1", "2"})
 
+    def test_request_enrichments_retries_invalid_json_content(self):
+        candidates = [{"id": "1", "text": "Long source text"}]
+        invalid_response = {"choices": [{"message": {"content": ""}}]}
+        valid_response = {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "items": [
+                                    {
+                                        "id": "1",
+                                        "title": "AI生成标题",
+                                        "summary_zh": "AI生成摘要",
+                                    }
+                                ]
+                            },
+                            ensure_ascii=False,
+                        )
+                    }
+                }
+            ]
+        }
+
+        with mock.patch.object(
+            enricher,
+            "post_json",
+            side_effect=[invalid_response, valid_response],
+        ) as post_json:
+            result = enricher.request_enrichments(
+                "https://api.deepseek.com/chat/completions",
+                "test-key",
+                "deepseek-v4-flash",
+                candidates,
+                timeout=60,
+                max_tokens=32_768,
+            )
+
+        self.assertEqual(result["1"]["title"], "AI生成标题")
+        self.assertEqual(post_json.call_count, 2)
+
+    def test_request_enrichments_does_not_retry_nonrecoverable_api_error(self):
+        candidates = [{"id": "1", "text": "Long source text"}]
+
+        with mock.patch.object(
+            enricher,
+            "post_json",
+            side_effect=RuntimeError("DeepSeek API returned HTTP 401"),
+        ) as post_json:
+            with self.assertRaisesRegex(RuntimeError, "HTTP 401"):
+                enricher.request_enrichments(
+                    "https://api.deepseek.com/chat/completions",
+                    "test-key",
+                    "deepseek-v4-flash",
+                    candidates,
+                    timeout=60,
+                    max_tokens=32_768,
+                )
+
+        self.assertEqual(post_json.call_count, 1)
+
+    def test_truncated_batch_is_split_without_retrying_same_size(self):
+        candidates = [
+            {"id": str(item_id), "text": f"Long source text {item_id}"}
+            for item_id in range(20)
+        ]
+
+        def fake_post_json(url, api_key, body, timeout):
+            request_items = json.loads(body["messages"][1]["content"])["items"]
+            if len(request_items) > 10:
+                return {
+                    "choices": [
+                        {
+                            "finish_reason": "length",
+                            "message": {"content": ""},
+                        }
+                    ]
+                }
+            return {
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "items": [
+                                        {
+                                            "id": item["id"],
+                                            "title": f"标题{item['id']}",
+                                            "summary_zh": f"摘要{item['id']}",
+                                        }
+                                        for item in request_items
+                                    ]
+                                },
+                                ensure_ascii=False,
+                            )
+                        },
+                    }
+                ]
+            }
+
+        with mock.patch.object(enricher, "post_json", side_effect=fake_post_json) as post_json:
+            batches = list(
+                enricher.request_enrichment_batches(
+                    "https://api.deepseek.com/chat/completions",
+                    "test-key",
+                    "deepseek-v4-flash",
+                    candidates,
+                    timeout=60,
+                    max_tokens=32_768,
+                )
+            )
+
+        self.assertEqual([len(batch) for batch, _ in batches], [10, 10])
+        self.assertEqual(post_json.call_count, 3)
+
     def test_apply_enrichments_updates_display_fields_and_preserves_raw(self):
         original_summary = "上游已有摘要"
         self.write_rows(
@@ -352,8 +468,12 @@ class OpenNewsEnricherTests(unittest.TestCase):
         self.assertEqual(summary["updated_items"], 1)
         self.assertEqual(summary["batches"], 1)
         request_body = post_json.call_args.args[2]
-        self.assertEqual(request_body["model"], "deepseek-chat")
+        self.assertEqual(request_body["model"], "deepseek-v4-flash")
+        self.assertEqual(request_body["thinking"], {"type": "enabled"})
+        self.assertEqual(request_body["reasoning_effort"], "high")
+        self.assertEqual(request_body["max_tokens"], 32_768)
         self.assertEqual(request_body["response_format"], {"type": "json_object"})
+        self.assertNotIn("temperature", request_body)
         with sqlite3.connect(self.database_path) as connection:
             stored = connection.execute(
                 "SELECT title, title_source, summary_zh FROM items WHERE id = '1'"

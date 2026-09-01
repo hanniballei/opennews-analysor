@@ -1,0 +1,10 @@
+[Unit]
+Description=Extract structured OpenNews listing events hourly with DeepSeek
+
+[Timer]
+OnCalendar=*-*-* *:07:00
+Persistent=true
+Unit=opennews-listing-enrichment-hourly.service
+
+[Install]
+WantedBy=timers.target
