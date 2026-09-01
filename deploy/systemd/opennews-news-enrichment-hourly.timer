@@ -1,0 +1,10 @@
+[Unit]
+Description=Enrich long OpenNews news text hourly with DeepSeek
+
+[Timer]
+OnCalendar=*-*-* *:05:00
+Persistent=true
+Unit=opennews-news-enrichment-hourly.service
+
+[Install]
+WantedBy=timers.target

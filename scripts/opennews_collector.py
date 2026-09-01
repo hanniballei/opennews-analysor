@@ -565,13 +565,40 @@ def write_rows_to_databases(
             for row in grouped.get(engine_type, []):
                 record = database_record(row, now)
                 existing = connection.execute(
-                    "SELECT quality_rank, schema_version, raw_json, collected_at FROM items WHERE id = ?",
+                    "SELECT quality_rank, schema_version, raw_json, collected_at, "
+                    "title, title_source, summary_zh, payload_json "
+                    "FROM items WHERE id = ?",
                     (record["id"],),
                 ).fetchone()
                 if existing is not None and existing[3] < record["collected_at"]:
                     record["collected_at"] = existing[3]
                     payload = json.loads(record["payload_json"])
                     payload["collected_at"] = existing[3]
+                    record["payload_json"] = json.dumps(
+                        payload,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                payload_overrides: dict[str, Any] = {}
+                if existing is not None and existing[5] == "deepseek":
+                    record["title"] = existing[4]
+                    record["title_source"] = existing[5]
+                    payload_overrides["title"] = existing[4]
+                    payload_overrides["title_source"] = existing[5]
+                existing_summary_source = None
+                if existing is not None:
+                    existing_payload = json.loads(existing[7])
+                    existing_summary_source = existing_payload.get("summary_source")
+                if existing is not None and existing[6] and (
+                    existing_summary_source == "deepseek" or not record["summary_zh"]
+                ):
+                    record["summary_zh"] = existing[6]
+                    payload_overrides["summary_zh"] = existing[6]
+                    if existing_summary_source:
+                        payload_overrides["summary_source"] = existing_summary_source
+                if payload_overrides:
+                    payload = json.loads(record["payload_json"])
+                    payload.update(payload_overrides)
                     record["payload_json"] = json.dumps(
                         payload,
                         ensure_ascii=False,

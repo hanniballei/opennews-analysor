@@ -1,0 +1,15 @@
+[Unit]
+Description=DeepSeek enrichment for long OpenNews news text
+Requires=docker.service
+After=docker.service network-online.target opennews-hourly.service
+Wants=network-online.target
+StartLimitIntervalSec=15min
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/trading/news
+ExecStart=/usr/bin/docker compose run --rm opennews-news-enricher
+TimeoutStartSec=20min
+Restart=on-failure
+RestartSec=2min

@@ -17,6 +17,8 @@ The current deployment does **not** collect `onchain`, `meme`, `market`, or `pre
 
 Normalized rows keep a row-level `profile` derived from `engine_type`: rows are written with `profile = "news"` or `profile = "listing"`.
 
+Long or multi-line news text is enriched separately with DeepSeek at `:05`. The enrichment service writes a concise Chinese display title to the existing SQLite `title` field, records `title_source = "deepseek"`, and writes a Chinese summary to `summary_zh`. It never changes `text`, `raw_json`, raw snapshots, or normalized JSONL archives.
+
 ## How It Works
 
 1. Independent systemd timers start the news and listing one-shot services.
@@ -27,6 +29,8 @@ Normalized rows keep a row-level `profile` derived from `engine_type`: rows are 
 6. Item IDs are deduplicated by engine with local state in `/root/trading/data/opennews/state/seen_ids.json`.
 7. Raw pages, normalized archives, engine-specific SQLite rows, and a per-run usage record are written to `/root/trading/data/opennews`.
 8. The containers exit; there is no long-running collector container.
+9. At `:05`, an independent one-shot service selects eligible news from each collection window whose text exceeds 160 characters or contains multiple lines, then sends them to DeepSeek in bounded batches.
+10. DeepSeek failures are retried independently and never cause the news collector to rerun or mark collection as failed.
 
 Paging follows 6551's point model, where every returned 20 records cost 1 point. News uses `limit = 20` for one point per full page. Listing uses `limit = 100` so the API's 100-page cap can still expose the full 10,000-record window. Each adaptive profile raises the next run to its configured ceiling after a saturated run and resets only after reaching a full page of IDs that existed before the run:
 
@@ -49,10 +53,13 @@ The public OpenNews search API supports one numeric minimum `score` filter per r
   Dockerfile
   docker-compose.yml
   scripts/opennews_collector.py
+  scripts/opennews_enricher.py
   deploy/systemd/opennews-hourly.service
   deploy/systemd/opennews-hourly.timer
   deploy/systemd/opennews-listing-hourly.service
   deploy/systemd/opennews-listing-hourly.timer
+  deploy/systemd/opennews-news-enrichment-hourly.service
+  deploy/systemd/opennews-news-enrichment-hourly.timer
   .env.example
   .gitignore
   .dockerignore
@@ -75,6 +82,7 @@ The real `.env` file is intentionally ignored by both git and Docker build conte
   state/adaptive_news-score-80.json
   state/last_run_listing-all.json
   state/adaptive_listing-all.json
+  state/news_enrichment.json
 ```
 
 `databases/news.sqlite3` and `databases/listing.sqlite3` are the current query stores. Each database has one `items` table keyed by the upstream item ID, with structured columns plus the normalized and raw JSON payloads. The two databases deliberately allow the same upstream ID to exist independently.
@@ -97,8 +105,8 @@ Each normalized JSONL row contains:
 | `source` | Best available display source |
 | `source_raw` / `news_type` | Upstream source and message/feed type kept separately |
 | `engine_type` | 6551 engine, currently `news` or `listing` |
-| `title` / `text` | Headline or text content |
-| `title_source` / `description` | Field used as title and upstream description/byline |
+| `title` / `text` | Display headline and immutable upstream text; long text can receive a generated Chinese title in SQLite |
+| `title_source` / `description` | `title`, `text`, or `deepseek` title provenance, plus upstream description/byline |
 | `link` | Source or preview URL when available |
 | `assets` | Related symbols/assets parsed from the original `coins` field |
 | `asset_details` | Full per-asset `symbol`, `market_type`, `score`, `grade`, and `signal` payload |
@@ -135,9 +143,14 @@ Required values:
 OPENNEWS_TOKEN=replace_with_your_6551_token
 OPENNEWS_DATA_DIR=/root/trading/data/opennews
 OPENNEWS_API_BASE_URL=https://ai.6551.io
+DEEPSEEK_API_KEY=replace_with_your_deepseek_api_key
+DEEPSEEK_API_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-chat
 ```
 
 The container maps the host data directory to `/data/opennews` and overrides `OPENNEWS_DATA_DIR` inside the container.
+
+`DEEPSEEK_API_KEY` is required only by the enrichment service. The collector services continue to work when DeepSeek is unavailable or the key is absent.
 
 ## Build
 
@@ -145,7 +158,7 @@ The container maps the host data directory to `/data/opennews` and overrides `OP
 docker compose build opennews-news-collector
 ```
 
-Rebuild the image after changing `scripts/opennews_collector.py`.
+Rebuild the image after changing either script under `scripts/`.
 
 ## Manual Runs
 
@@ -248,6 +261,14 @@ docker compose run --rm opennews-news-collector \
 
 This example scans pages 91-100. Requests beyond page 100 are capped locally because the API otherwise repeats page 100.
 
+Run DeepSeek enrichment manually after setting `DEEPSEEK_API_KEY` in `.env`:
+
+```bash
+docker compose run --rm opennews-news-enricher
+```
+
+On its first run, the enricher starts with the latest completed news collection instead of backfilling the full historical database. It advances a durable collection cursor only after every eligible row in the window succeeds, so retries cannot permanently skip older rows. Short headline-like text remains unchanged with `title_source = "text"`. Existing upstream titles and Chinese summaries are preserved, and a later collector refresh cannot overwrite a generated title or summary.
+
 ## systemd Deployment
 
 Install or update the timers:
@@ -257,9 +278,12 @@ cp deploy/systemd/opennews-hourly.service /etc/systemd/system/
 cp deploy/systemd/opennews-hourly.timer /etc/systemd/system/
 cp deploy/systemd/opennews-listing-hourly.service /etc/systemd/system/
 cp deploy/systemd/opennews-listing-hourly.timer /etc/systemd/system/
+cp deploy/systemd/opennews-news-enrichment-hourly.service /etc/systemd/system/
+cp deploy/systemd/opennews-news-enrichment-hourly.timer /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now opennews-hourly.timer
 systemctl enable --now opennews-listing-hourly.timer
+systemctl enable --now opennews-news-enrichment-hourly.timer
 ```
 
 Check timer status:
@@ -273,6 +297,7 @@ Start either collector manually through systemd:
 ```bash
 systemctl start opennews-hourly.service
 systemctl start opennews-listing-hourly.service
+systemctl start opennews-news-enrichment-hourly.service
 ```
 
 Read service logs:
@@ -280,6 +305,7 @@ Read service logs:
 ```bash
 journalctl -u opennews-hourly.service -n 80 --no-pager
 journalctl -u opennews-listing-hourly.service -n 80 --no-pager
+journalctl -u opennews-news-enrichment-hourly.service -n 80 --no-pager
 ```
 
 ## Useful State Files
@@ -300,7 +326,7 @@ tail -n 1 /root/trading/data/opennews/usage/$(date -u +%Y/%m/%d).jsonl
 python3 -m unittest discover -s tests -v
 ```
 
-The tests cover same-run duplicates, historical IDs, fully historical pages, point accounting, recovery page offsets, saturated-run recovery, and score-filtered request construction.
+The tests cover same-run duplicates, historical IDs, fully historical pages, point accounting, recovery page offsets, saturated-run recovery, score-filtered request construction, DeepSeek response validation, enrichment updates, and preservation of generated display fields during later collector refreshes.
 
 ## Downstream Reading Tips
 

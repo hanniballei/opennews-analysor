@@ -52,3 +52,16 @@ services:
       - --no-stop-on-known-item
       - --stop-after-known-pages
       - "1"
+
+  opennews-news-enricher:
+    <<: *opennews-common
+    entrypoint:
+      - python
+      - /app/scripts/opennews_enricher.py
+    command:
+      - --min-text-length
+      - "160"
+      - --batch-size
+      - "20"
+      - --max-batch-characters
+      - "30000"
