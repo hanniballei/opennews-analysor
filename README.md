@@ -19,6 +19,8 @@ Normalized rows keep a row-level `profile` derived from `engine_type`: rows are 
 
 Long or multi-line news text is enriched separately with DeepSeek at `:05`. The enrichment service writes a concise Chinese display title to the existing SQLite `title` field, records `title_source = "deepseek"`, and writes a Chinese summary to `summary_zh`. It never changes `text`, `raw_json`, raw snapshots, or normalized JSONL archives.
 
+Listing-engine messages are intentionally not AI-processed. Their original `text`, structured fields, links, and raw payloads remain available for downstream consumers to interpret directly.
+
 ## How It Works
 
 1. Independent systemd timers start the news and listing one-shot services.
