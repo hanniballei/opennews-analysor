@@ -8,7 +8,7 @@ StartLimitBurst=3
 
 [Service]
 Type=oneshot
-WorkingDirectory=/root/trading/news
+WorkingDirectory=/root/trading/monitors/news
 ExecStart=/usr/bin/docker compose run --rm opennews-news-collector
 TimeoutStartSec=20min
 Restart=on-failure
