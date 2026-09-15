@@ -24,6 +24,8 @@ DEFAULT_BATCH_SIZE = ai.DEFAULT_BATCH_SIZE
 DEFAULT_MAX_BATCH_CHARACTERS = ai.DEFAULT_MAX_BATCH_CHARACTERS
 DEFAULT_MAX_TOKENS = ai.DEFAULT_MAX_TOKENS
 DEFAULT_REQUEST_ATTEMPTS = ai.DEFAULT_REQUEST_ATTEMPTS
+MAX_TITLE_CHARACTERS = 80
+MAX_SUMMARY_CHARACTERS = 600
 RetryableDeepSeekError = ai.RetryableDeepSeekError
 TruncatedResponseError = ai.TruncatedResponseError
 atomic_write_json = ai.atomic_write_json
@@ -109,6 +111,50 @@ def build_request(
     return ai.chat_request(model, SYSTEM_PROMPT, items, max_tokens)
 
 
+def truncate_field(
+    value: str,
+    limit: int,
+    *,
+    field: str,
+    item_id: str,
+) -> str:
+    """Clamp an over-long model field instead of failing the whole batch.
+
+    The model occasionally breaks the length contract. Treating that as a hard
+    error made a batch fail deterministically, and both the in-request retries
+    and the systemd restart policy then re-sent the same batch to the API. The
+    bound is a display limit, so trimming it keeps the run progressing; the
+    violation is reported on stderr so it stays visible in the journal.
+    """
+
+    if len(value) <= limit:
+        return value
+
+    clipped = value[:limit]
+    for terminator in ("。", "！", "？", "；", "…", ".", "!", "?", ";"):
+        index = clipped.rfind(terminator)
+        if index >= limit // 2:
+            clipped = clipped[: index + 1]
+            break
+
+    print(
+        json.dumps(
+            {
+                "warning": "truncated_field",
+                "item_id": item_id,
+                "field": field,
+                "original_length": len(value),
+                "kept_length": len(clipped),
+                "limit": limit,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ),
+        file=sys.stderr,
+    )
+    return clipped
+
+
 def parse_enrichments(
     response: dict[str, Any],
     expected_ids: set[str],
@@ -130,10 +176,18 @@ def parse_enrichments(
         summary_zh = " ".join(str(item.get("summary_zh") or "").split())
         if not item_id or not title or not summary_zh:
             raise RuntimeError("DeepSeek returned an incomplete enrichment item")
-        if len(title) > 80:
-            raise RuntimeError(f"DeepSeek title for {item_id} exceeded 80 characters")
-        if len(summary_zh) > 600:
-            raise RuntimeError(f"DeepSeek summary for {item_id} exceeded 600 characters")
+        title = truncate_field(
+            title,
+            MAX_TITLE_CHARACTERS,
+            field="title",
+            item_id=item_id,
+        )
+        summary_zh = truncate_field(
+            summary_zh,
+            MAX_SUMMARY_CHARACTERS,
+            field="summary_zh",
+            item_id=item_id,
+        )
         if item_id in enrichments:
             raise RuntimeError(f"DeepSeek returned duplicate ID {item_id}")
         enrichments[item_id] = {"title": title, "summary_zh": summary_zh}

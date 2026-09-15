@@ -100,6 +100,166 @@ class OpenNewsEnricherTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "IDs did not match"):
             enricher.parse_enrichments(response, {"1", "2"})
 
+    def test_parse_enrichments_truncates_over_long_fields_and_warns(self):
+        sentence = "油价上涨推高通胀预期。"
+        response = {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "items": [
+                                    {
+                                        "id": "1",
+                                        "title": "标题" * 50,
+                                        "summary_zh": sentence * 60,
+                                    }
+                                ]
+                            },
+                            ensure_ascii=False,
+                        )
+                    }
+                }
+            ]
+        }
+
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            parsed = enricher.parse_enrichments(response, {"1"})
+
+        self.assertEqual(
+            parsed["1"]["title"],
+            ("标题" * 50)[: enricher.MAX_TITLE_CHARACTERS],
+        )
+        self.assertEqual(len(parsed["1"]["title"]), enricher.MAX_TITLE_CHARACTERS)
+        self.assertEqual(parsed["1"]["summary_zh"], sentence * 54)
+        self.assertEqual(len(parsed["1"]["summary_zh"]), 594)
+        self.assertTrue(parsed["1"]["summary_zh"].endswith("。"))
+
+        warnings = [
+            json.loads(line)
+            for line in stderr.getvalue().splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(
+            [
+                (warning["warning"], warning["field"], warning["item_id"])
+                for warning in warnings
+            ],
+            [
+                ("truncated_field", "title", "1"),
+                ("truncated_field", "summary_zh", "1"),
+            ],
+        )
+        self.assertEqual(warnings[1]["original_length"], 660)
+        self.assertEqual(warnings[1]["kept_length"], 594)
+
+    def test_parse_enrichments_keeps_in_range_fields_untouched(self):
+        title = "标" * enricher.MAX_TITLE_CHARACTERS
+        summary = "摘" * enricher.MAX_SUMMARY_CHARACTERS
+        response = {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "items": [
+                                    {
+                                        "id": "1",
+                                        "title": title,
+                                        "summary_zh": summary,
+                                    }
+                                ]
+                            },
+                            ensure_ascii=False,
+                        )
+                    }
+                }
+            ]
+        }
+
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            parsed = enricher.parse_enrichments(response, {"1"})
+
+        self.assertEqual(parsed["1"]["title"], title)
+        self.assertEqual(parsed["1"]["summary_zh"], summary)
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_parse_enrichments_still_rejects_incomplete_items(self):
+        response = {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "items": [
+                                    {"id": "1", "title": "", "summary_zh": "摘要"}
+                                ]
+                            },
+                            ensure_ascii=False,
+                        )
+                    }
+                }
+            ]
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "incomplete enrichment item"):
+            enricher.parse_enrichments(response, {"1"})
+
+    def test_request_enrichments_does_not_retry_over_long_fields(self):
+        # Regression: an over-long field used to raise from the parser, which the
+        # retry loop then re-sent to the API. One posted response is queued, so a
+        # second attempt would exhaust the mock and fail this test.
+        candidates = [{"id": "1", "text": "Long source text"}]
+        response = {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "items": [
+                                    {
+                                        "id": "1",
+                                        "title": "标题" * 50,
+                                        "summary_zh": "摘要" * 400,
+                                    }
+                                ]
+                            },
+                            ensure_ascii=False,
+                        )
+                    }
+                }
+            ]
+        }
+
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            with mock.patch.object(
+                enricher,
+                "post_json",
+                side_effect=[response],
+            ) as post_json:
+                result = enricher.request_enrichments(
+                    "https://api.deepseek.com/chat/completions",
+                    "test-key",
+                    "deepseek-v4-flash",
+                    candidates,
+                    timeout=60,
+                    max_tokens=32_768,
+                )
+
+        self.assertEqual(post_json.call_count, 1)
+        self.assertEqual(
+            len(result["1"]["title"]),
+            enricher.MAX_TITLE_CHARACTERS,
+        )
+        self.assertEqual(
+            len(result["1"]["summary_zh"]),
+            enricher.MAX_SUMMARY_CHARACTERS,
+        )
+        self.assertIn("truncated_field", stderr.getvalue())
+
     def test_request_enrichments_retries_invalid_json_content(self):
         candidates = [{"id": "1", "text": "Long source text"}]
         invalid_response = {"choices": [{"message": {"content": ""}}]}
